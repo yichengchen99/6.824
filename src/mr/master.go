@@ -27,6 +27,8 @@ type reduceTask struct {
 
 type Master struct {
 	// Your definitions here.
+	mu sync.Mutex
+
 	mapFiles     chan string
 	mapFileIndex int
 	mapTasks     map[int]*mapTask
@@ -35,8 +37,6 @@ type Master struct {
 	reduceTasks   map[int]*reduceTask
 
 	nReduce int
-
-	mu sync.Mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
