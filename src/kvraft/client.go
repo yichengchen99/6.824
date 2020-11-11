@@ -1,13 +1,18 @@
 package kvraft
 
-import "../labrpc"
+import (
+	"../labrpc"
+	"time"
+)
 import "crypto/rand"
 import "math/big"
-
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+
+	leader   int
+	clientId int64
 }
 
 func nrand() int64 {
@@ -21,6 +26,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+
+	ck.leader = 0
+	ck.clientId = time.Now().UnixNano()
 	return ck
 }
 
@@ -37,9 +45,35 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	return ""
+	var res string
+
+	args := GetArgs{
+		Key:       key,
+		RequestId: time.Now().UnixNano(),
+		ClientId:  ck.clientId,
+	}
+
+	for {
+		reply := GetReply{}
+
+		ok := ck.servers[ck.leader].Call("KVServer.Get", &args, &reply)
+
+		if !ok || reply.Err == ErrWrongLeader {
+			ck.leader = (ck.leader + 1) % len(ck.servers)
+			continue
+		}
+
+		if reply.Err == ErrNoKey {
+			res = ""
+			break
+		} else {
+			res = reply.Value
+			break
+		}
+	}
+
+	return res
 }
 
 //
@@ -54,11 +88,31 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+
+	args := PutAppendArgs{
+		Key:       key,
+		Value:     value,
+		Op:        op,
+		RequestId: time.Now().UnixNano(),
+		ClientId:  ck.clientId,
+	}
+
+	for {
+		reply := PutAppendReply{}
+
+		ok := ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply)
+
+		if !ok || reply.Err == ErrWrongLeader {
+			ck.leader = (ck.leader + 1) % len(ck.servers)
+			continue
+		}
+		break
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
+	ck.PutAppend(key, value, "PUT")
 }
 func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
+	ck.PutAppend(key, value, "APPEND")
 }

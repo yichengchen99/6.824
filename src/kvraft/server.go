@@ -3,10 +3,11 @@ package kvraft
 import (
 	"../labgob"
 	"../labrpc"
-	"log"
 	"../raft"
+	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = 0
@@ -18,11 +19,21 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+const (
+	GET    = "GET"
+	PUT    = "PUT"
+	APPEND = "APPEND"
+)
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	OpType    string
+	Key       string
+	Value     string
+	RequestId int64
+	ClientId  int64
 }
 
 type KVServer struct {
@@ -35,15 +46,75 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	kvs              map[string]string
+	clientRequestIds map[int64]int64
+	indexChannels    map[int]*chan result
 }
 
+type result struct {
+	value string
+	err   Err
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	op := Op{
+		OpType:    GET,
+		Key:       args.Key,
+		Value:     "",
+		RequestId: args.RequestId,
+		ClientId:  args.ClientId,
+	}
+
+	index, _, isLeader := kv.rf.Start(op)
+
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	} else {
+		ch := make(chan result)
+		kv.addIndexChannel(index, &ch)
+
+		go kv.checkRequestTimeout(index)
+
+		res := <-ch
+
+		kv.removeIndexChannel(index)
+
+		reply.Value = res.value
+		reply.Err = res.err
+
+	}
+
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	op := Op{
+		OpType:    args.Op,
+		Key:       args.Key,
+		Value:     args.Value,
+		RequestId: args.RequestId,
+		ClientId:  args.ClientId,
+	}
+
+	index, _, isLeader := kv.rf.Start(op)
+
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	} else {
+		ch := make(chan result)
+		kv.addIndexChannel(index, &ch)
+
+		go kv.checkRequestTimeout(index)
+
+		res := <-ch
+
+		kv.removeIndexChannel(index)
+
+		reply.Err = res.err
+	}
 }
 
 //
@@ -65,6 +136,85 @@ func (kv *KVServer) Kill() {
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
+}
+
+func (kv *KVServer) apply() {
+	for {
+		if kv.killed() {
+			break
+		}
+
+		applyMsg := <-kv.applyCh
+
+		op := applyMsg.Command.(Op)
+
+		//DPrintf("[%v] TOP LAYER APPLY_MSG %v", kv.rf.me, applyMsg)
+
+		res := result{}
+		res.err = OK
+
+		kv.mu.Lock()
+
+		if op.OpType == GET {
+			value, ok := kv.kvs[op.Key]
+			if ok {
+				res.value = value
+			} else {
+				res.err = ErrNoKey
+			}
+		} else if op.OpType == PUT {
+			requestId, ok := kv.clientRequestIds[op.ClientId]
+
+			if !ok || (ok && requestId < op.RequestId) {
+				kv.clientRequestIds[op.ClientId] = op.RequestId
+				kv.kvs[op.Key] = op.Value
+			}
+		} else if op.OpType == APPEND {
+			requestId, ok := kv.clientRequestIds[op.ClientId]
+
+			if !ok || (ok && requestId < op.RequestId) {
+				kv.clientRequestIds[op.ClientId] = op.RequestId
+				_, ok = kv.kvs[op.Key]
+
+				if ok {
+					kv.kvs[op.Key] += op.Value
+				} else {
+					kv.kvs[op.Key] = op.Value
+				}
+
+			}
+		}
+
+		kv.mu.Unlock()
+
+		_, isLeader := kv.rf.GetState()
+
+		if isLeader {
+			ch, ok := kv.getIndexChannel(applyMsg.CommandIndex)
+			kv.removeIndexChannel(applyMsg.CommandIndex)
+
+			if ok {
+				*ch <- res
+			} else {
+				//DPrintf("[%v], Here", kv.rf.me)
+			}
+		}
+	}
+}
+
+func (kv *KVServer) checkRequestTimeout(index int) {
+	time.Sleep(750 * time.Millisecond)
+	ch, ok := kv.getIndexChannel(index)
+	kv.removeIndexChannel(index)
+
+	if ok {
+		res := result{
+			value: "",
+			err:   ErrWrongLeader,
+		}
+		*ch <- res
+		//DPrintf("[%v], here", kv.rf.me)
+	}
 }
 
 //
@@ -96,6 +246,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.kvs = make(map[string]string)
+	kv.clientRequestIds = make(map[int64]int64)
+	kv.indexChannels = make(map[int]*chan result)
 
+	go kv.apply()
 	return kv
 }

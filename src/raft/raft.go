@@ -420,7 +420,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		//	DPrintf("%v", rf.log[i])
 		//}
 
-		DPrintf("[%v] START command %v", rf.me, command)
+		DPrintf("[%v] START %v, index %v", rf.me, command, index)
 
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
@@ -613,6 +613,7 @@ func (rf *Raft) apply() {
 
 		for rf.commitIndex <= rf.lastApplied {
 			rf.applyCond.Wait()
+			//DPrintf("[%v] wakeup commitIndex %v, lastApplied %v", rf.me, rf.commitIndex, rf.lastApplied)
 		}
 
 		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
@@ -625,7 +626,7 @@ func (rf *Raft) apply() {
 
 			rf.mu.Unlock()
 			rf.applyCh <- applyMsg
-			DPrintf("[%v] APPLY %v", rf.me, applyMsg)
+			DPrintf("[%v] APPLY %v, lastApplied %v", rf.me, applyMsg, i)
 
 			//for i := 0; i < len(rf.log); i++ {
 			//	DPrintf("[%v] %v", rf.me, rf.log[i])
@@ -633,6 +634,7 @@ func (rf *Raft) apply() {
 
 			rf.mu.Lock()
 			rf.lastApplied = i
+
 		}
 
 		rf.mu.Unlock()
