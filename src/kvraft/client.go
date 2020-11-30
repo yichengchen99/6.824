@@ -51,8 +51,6 @@ func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 
 	args.Key = key
-	args.RequestId = time.Now().UnixNano()
-	args.ClientId = ck.clientId
 
 	for {
 		reply := GetReply{}
@@ -60,6 +58,7 @@ func (ck *Clerk) Get(key string) string {
 		ok := ck.servers[ck.leader].Call("KVServer.Get", &args, &reply)
 
 		if !ok || reply.Err == ErrWrongLeader {
+			// update leader so that next rpc may reach leader raft
 			ck.leader = (ck.leader + 1) % len(ck.servers)
 			time.Sleep(100 * time.Millisecond)
 			continue
@@ -104,6 +103,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		ok := ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply)
 
 		if !ok || reply.Err == ErrWrongLeader {
+			// update leader so that next rpc may reach leader raft
 			ck.leader = (ck.leader + 1) % len(ck.servers)
 			time.Sleep(100 * time.Millisecond)
 			continue

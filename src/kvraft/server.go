@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -30,9 +30,11 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	OpType    string
-	Key       string
-	Value     string
+	OpType string
+
+	Key   string
+	Value string
+
 	RequestId int64
 	ClientId  int64
 }
@@ -49,9 +51,9 @@ type KVServer struct {
 	// Your definitions here.
 	kvs              map[string]string
 	clientRequestIds map[int64]int64
-	indexChannels    map[int]*chan result
+	indexChannels    map[int]chan result
 
-	lastApplied int
+	lastAppliedIndex int
 }
 
 type result struct {
@@ -61,61 +63,63 @@ type result struct {
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	op := Op{
-		OpType:    GET,
-		Key:       args.Key,
-		Value:     "",
-		RequestId: args.RequestId,
-		ClientId:  args.ClientId,
-	}
+	op := Op{}
 
+	op.OpType = GET
+	op.Key = args.Key
+
+	// call rf.Start to add log
 	index, _, isLeader := kv.rf.Start(op)
 
+	// not leader, return wrong leader err
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
-	} else {
-		ch := make(chan result)
-		kv.addIndexChannel(index, &ch)
-
-		go kv.checkRequestTimeout(index)
-
-		res := <-ch
-
-		kv.removeIndexChannel(index)
-
-		reply.Value = res.value
-		reply.Err = res.err
 	}
+
+	// create a new chan to transmit res
+	ch := make(chan result)
+	kv.addIndexChannel(index, ch)
+
+	// if timeout, add wrong res to chan
+	go kv.checkRequestTimeout(index)
+
+	// wait for res
+	res := <-ch
+
+	kv.removeIndexChannel(index)
+
+	reply.Value = res.value
+	reply.Err = res.err
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	op := Op{
-		OpType:    args.Op,
-		Key:       args.Key,
-		Value:     args.Value,
-		RequestId: args.RequestId,
-		ClientId:  args.ClientId,
-	}
+	op := Op{}
+
+	op.OpType = args.Op
+	op.Key = args.Key
+	op.Value = args.Value
+	op.RequestId = args.RequestId
+	op.ClientId = args.ClientId
 
 	index, _, isLeader := kv.rf.Start(op)
 
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
-	} else {
-		ch := make(chan result)
-		kv.addIndexChannel(index, &ch)
-
-		go kv.checkRequestTimeout(index)
-
-		res := <-ch
-
-		kv.removeIndexChannel(index)
-
-		reply.Err = res.err
 	}
+
+	ch := make(chan result)
+	kv.addIndexChannel(index, ch)
+
+	go kv.checkRequestTimeout(index)
+
+	res := <-ch
+
+	kv.removeIndexChannel(index)
+
+	reply.Err = res.err
 }
 
 //
@@ -145,6 +149,7 @@ func (kv *KVServer) apply() {
 			break
 		}
 
+		// command from Raft layer
 		applyMsg := <-kv.applyCh
 
 		//DPrintf("[%v] TOP LAYER APPLY_MSG %v", kv.rf.me, applyMsg)
@@ -162,6 +167,7 @@ func (kv *KVServer) apply() {
 
 		kv.mu.Lock()
 
+		// execute command
 		if op.OpType == GET {
 			value, ok := kv.kvs[op.Key]
 			if ok {
@@ -172,6 +178,7 @@ func (kv *KVServer) apply() {
 		} else if op.OpType == PUT {
 			requestId, ok := kv.clientRequestIds[op.ClientId]
 
+			// if in order
 			if !ok || (ok && requestId < op.RequestId) {
 				kv.clientRequestIds[op.ClientId] = op.RequestId
 				kv.kvs[op.Key] = op.Value
@@ -190,19 +197,20 @@ func (kv *KVServer) apply() {
 				}
 			}
 		}
-		kv.lastApplied = applyMsg.CommandIndex
+		kv.lastAppliedIndex = applyMsg.CommandIndex
 		kv.mu.Unlock()
 
 		go kv.saveSnapshot()
 
 		_, isLeader := kv.rf.GetState()
 
+		// if is leader, send res
 		if isLeader {
 			ch, ok := kv.getIndexChannel(applyMsg.CommandIndex)
 			kv.removeIndexChannel(applyMsg.CommandIndex)
 
 			if ok {
-				*ch <- res
+				ch <- res
 			} else {
 				//DPrintf("[%v], Here", kv.rf.me)
 			}
@@ -211,16 +219,15 @@ func (kv *KVServer) apply() {
 }
 
 func (kv *KVServer) checkRequestTimeout(index int) {
-	time.Sleep(750 * time.Millisecond)
+	time.Sleep(700 * time.Millisecond)
 	ch, ok := kv.getIndexChannel(index)
 	kv.removeIndexChannel(index)
 
 	if ok {
-		res := result{
-			value: "",
-			err:   ErrWrongLeader,
-		}
-		*ch <- res
+		res := result{}
+		res.err = ErrWrongLeader
+
+		ch <- res
 		//DPrintf("[%v], here", kv.rf.me)
 	}
 }
@@ -244,20 +251,20 @@ func (kv *KVServer) readSnapshot() {
 	kv.mu.Lock()
 	kv.kvs = kvs
 	kv.clientRequestIds = clientRequestIds
-	kv.lastApplied = index
+	kv.lastAppliedIndex = index
 	kv.mu.Unlock()
 }
 
 func (kv *KVServer) saveSnapshot() {
 	if kv.maxraftstate != -1 && kv.rf.GetRaftStateSize() > kv.maxraftstate {
-		kv.mu.Lock()
 		w := new(bytes.Buffer)
 		e := labgob.NewEncoder(w)
 
+		kv.mu.Lock()
 		e.Encode(kv.kvs)
 		e.Encode(kv.clientRequestIds)
 
-		index := kv.lastApplied
+		index := kv.lastAppliedIndex
 		snapshot := w.Bytes()
 		kv.mu.Unlock()
 
@@ -297,7 +304,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.kvs = make(map[string]string)
 	kv.clientRequestIds = make(map[int64]int64)
-	kv.indexChannels = make(map[int]*chan result)
+	kv.indexChannels = make(map[int]chan result)
 
 	kv.readSnapshot()
 
